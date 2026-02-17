@@ -276,6 +276,9 @@ Cの人: シチュエーションに触れていない。バズワード止ま�
 # ==========================================
 def load_css():
     st.markdown("""<style>
+    /* --- プレイヤー（再生ボタン）を非表示にする設定 --- */
+    audio { display: none; }
+
     @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
     .main{background:linear-gradient(135deg,#1e3a8a 0%,#312e81 100%);color:#fff}
     .stButton>button{background:linear-gradient(180deg,#fbbf24,#f59e0b);color:#000;
