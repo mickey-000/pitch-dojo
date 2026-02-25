@@ -3,10 +3,10 @@ import streamlit as st
 from streamlit_mic_recorder import mic_recorder
 from openai import OpenAI
 from google import genai
-import time, json, io, wave, struct, math
+import time, json, io, wave, struct, math, os
 
 # ==========================================
-# 提案力道場 v2 - 設定
+# 提案力道場 v3 - 設定
 # ==========================================
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
 GENAI_API_KEY = st.secrets.get("GENAI_API_KEY", "YOUR_GEMINI_API_KEY")
@@ -36,7 +36,6 @@ def generate_wav(notes, wave_type='square', volume=0.35, sample_rate=22050):
                 v = volume * (2.0 * p - 1.0)
             else:
                 v = volume if math.sin(2 * math.pi * freq * t) >= 0 else -volume
-            # 末尾フェードアウト
             left = n - i
             if left < 100:
                 v *= left / 100.0
@@ -52,7 +51,6 @@ def generate_wav(notes, wave_type='square', volume=0.35, sample_rate=22050):
     buf.seek(0)
     return buf.read()
 
-# 効果音の定義
 SOUND_DEFS = {
     "start":     ([(523,0.12),(659,0.12),(784,0.12),(1047,0.25)], "square"),
     "encounter": ([(220,0.08),(277,0.08),(330,0.08),(0,0.06),(220,0.08),(277,0.08),(330,0.08),(440,0.18)], "square"),
@@ -65,18 +63,17 @@ SOUND_DEFS = {
     "result_c":  ([(311,0.25),(262,0.35)], "triangle"),
     "levelup":   ([(523,0.07),(587,0.07),(659,0.07),(698,0.07),(784,0.07),(880,0.07),(988,0.07),(1047,0.20)], "square"),
     "ending":    ([(523,0.16),(659,0.16),(784,0.16),(1047,0.32),(784,0.12),(880,0.12),(1047,0.40)], "square"),
+    "secret":    ([(784,0.10),(988,0.10),(1175,0.10),(0,0.05),(784,0.10),(988,0.10),(1175,0.10),(0,0.05),(1047,0.12),(1175,0.12),(1319,0.12),(1047,0.40)], "triangle"),
 }
 
 @st.cache_data
 def get_wav(name):
-    """WAVバイト列を生成してキャッシュ"""
     if name not in SOUND_DEFS:
         return None
     notes, wt = SOUND_DEFS[name]
     return generate_wav(notes, wt)
 
 def play_sound(name):
-    """st.audio の autoplay で効果音を再生"""
     data = get_wav(name)
     if data:
         st.audio(data, format="audio/wav", autoplay=True)
@@ -85,9 +82,9 @@ def play_sound(name):
 # ゲーム設定
 # ==========================================
 LEVELS = {
-    1: {"name": "お客様の課長", "emoji": "👔", "time": 120, "perspective": "現場"},
-    2: {"name": "お客様の部長", "emoji": "🎩", "time": 120, "perspective": "部門"},
-    3: {"name": "お客様の経営層", "emoji": "👑", "time": 60, "perspective": "全社"},
+    1: {"name": "お客様の課長", "emoji": "👔", "perspective": "現場"},
+    2: {"name": "お客様の部長", "emoji": "🎩", "perspective": "部門"},
+    3: {"name": "お客様の経営層", "emoji": "👑", "perspective": "全社"},
 }
 
 THEMES = {
@@ -234,10 +231,6 @@ def evaluate_pitch(level, theme, transcript):
 【ランク判定】
 S (90-100) / A (70-89) / B (50-69) / C (0-49)
 
-【BとCの判定基準（重要・厳守）】
-Bの人: シチュエーションの状況に触れている。施策を1つは方向性レベルで示せている。効果にも言及しているが漠然。
-Cの人: シチュエーションに触れていない。バズワード止まり。効果が「思います」「はず」レベル。
-
 以下のJSON形式で返してください：
 {{
   "score": 合計点数（0-100の整数）,
@@ -272,11 +265,18 @@ Cの人: シチュエーションに触れていない。バズワード止ま�
                     "comment":f"エラー: {e}"}
 
 # ==========================================
+# 時間フォーマット
+# ==========================================
+def fmt_time(seconds):
+    """秒数を mm:ss 形式に変換"""
+    seconds = int(seconds)
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+# ==========================================
 # CSS
 # ==========================================
 def load_css():
     st.markdown("""<style>
-    /* --- プレイヤー（再生ボタン）を非表示にする設定 --- */
     audio { display: none; }
 
     @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
@@ -287,12 +287,23 @@ def load_css():
     .stButton>button:hover{background:linear-gradient(180deg,#fcd34d,#fbbf24);transform:translateY(-2px)}
     h1,h2,h3{text-shadow:2px 2px 4px rgba(0,0,0,.8)}
     .village-elder{background:rgba(0,0,0,.6);border:3px solid #fbbf24;border-radius:12px;padding:20px;margin:20px 0}
-    .countdown{font-size:48px;font-weight:bold;color:#fbbf24;text-align:center;text-shadow:3px 3px 6px rgba(0,0,0,.8)}
+    .timer-box{font-size:40px;font-weight:bold;color:#4ade80;text-align:center;
+      text-shadow:3px 3px 6px rgba(0,0,0,.8);background:rgba(0,0,0,.5);
+      border:2px solid #4ade80;border-radius:8px;padding:10px;margin:10px 0}
+    .timer-label{font-size:13px;color:#a3e635;text-align:center;margin-bottom:4px;font-weight:bold}
+    .timer-stopped{color:#fbbf24 !important;border-color:#fbbf24 !important}
     .dragon-quest-box{background:#000;border:4px solid #fff;padding:30px 40px;margin:20px 0;
       font-family:'Press Start 2P',cursive;font-size:24px;color:#fff;text-shadow:3px 3px 0 #000;
       line-height:2.2;box-shadow:0 8px 16px rgba(0,0,0,.8);text-align:center}
     .core-info-box{background:rgba(251,191,36,.15);border:2px solid #fbbf24;
       border-radius:8px;padding:12px 16px;margin:10px 0;font-size:14px}
+    .time-record-box{background:rgba(74,222,128,.1);border:2px solid #4ade80;
+      border-radius:8px;padding:12px 16px;margin:10px 0;font-size:15px}
+    .secret-btn>button{background:linear-gradient(180deg,#1e3a8a,#312e81) !important;
+      color:#1e3a8a !important;border:1px solid #1e3a8a !important;
+      font-size:8px !important;min-height:20px !important;padding:2px 4px !important;
+      box-shadow:none !important;opacity:0.15}
+    .secret-btn>button:hover{opacity:0.6 !important;color:#fff !important}
     </style>""", unsafe_allow_html=True)
 
 # ==========================================
@@ -303,9 +314,19 @@ load_css()
 
 if 'scene' not in st.session_state:
     st.session_state.update({
-        'scene':'title','level':1,'theme':None,
-        'hints_unlocked':0,'prep_start':0,
-        'results':[],'transcript':'','play_sound':None
+        'scene': 'title',
+        'level': 1,
+        'theme': None,
+        'hints_unlocked': 0,
+        # --- タイマー ---
+        'prep_start': 0.0,      # 作戦会議タイマー開始時刻
+        'prep_time': 0.0,       # 確定した作戦会議時間（秒）
+        'pitch_start': 0.0,     # ピッチタイマー開始時刻
+        'pitch_time': 0.0,      # 確定したピッチ時間（秒）
+        # -----------------
+        'results': [],
+        'transcript': '',
+        'play_sound': None,
     })
 
 # --- 効果音再生（ページ最上部で1回だけ） ---
@@ -348,26 +369,60 @@ elif st.session_state.scene == 'theme_select':
     st.write(f"視点: **{boss['perspective']}**")
     st.write("### 🎲 試練を選べ")
     c1,c2,c3 = st.columns(3)
-    for col, key, label in [(c1,"DX","⚡ DX\n（デジタルの光）"),(c2,"コスト削減","💰 コスト削減\n（黄金の節約）"),(c3,"納期遅延","⏰ 納期遅延\n（運命の時計）")]:
+    for col, key, label in [
+        (c1, "DX", "⚡ DX\n（デジタルの光）"),
+        (c2, "コスト削減", "💰 コスト削減\n（黄金の節約）"),
+        (c3, "納期遅延", "⏰ 納期遅延\n（運命の時計）"),
+    ]:
         with col:
             if st.button(label):
                 st.session_state.theme = key
                 st.session_state.hints_unlocked = 0
+                # ★ 作戦会議タイマー：テーマ選択と同時にスタート
+                st.session_state.prep_start = time.time()
+                st.session_state.prep_time = 0.0
                 st.session_state.scene = 'quest'
                 st.session_state.play_sound = 'select'
                 st.rerun()
 
 # ==========================================
-# お題とヒント
+# お題・作戦会議（タイマー自動スタート済み）
 # ==========================================
 elif st.session_state.scene == 'quest':
-    lv = st.session_state.level; th = st.session_state.theme
-    boss = LEVELS[lv]; ti = THEMES[th]
+    lv = st.session_state.level
+    th = st.session_state.theme
+    boss = LEVELS[lv]
+    ti = THEMES[th]
+
     st.markdown(f"## {boss['emoji']} Lv.{lv}: {boss['name']}")
     st.markdown(f"### {ti['title']}")
+
+    # ★ カウントアップタイマー（JS）
+    elapsed_init = int(time.time() - st.session_state.prep_start)
+    timer_id = "prep_timer"
+    st.markdown(f"""
+    <div class="timer-label">⏱️ 作戦会議タイム（計測中）</div>
+    <div id="{timer_id}" class="timer-box">{fmt_time(elapsed_init)}</div>
+    <script>
+    (function() {{
+        var startEpoch = {st.session_state.prep_start};
+        var el = document.getElementById('{timer_id}');
+        if (!el) return;
+        if (window._prepTimer) clearInterval(window._prepTimer);
+        window._prepTimer = setInterval(function() {{
+            var e = Math.floor(Date.now() / 1000 - startEpoch);
+            var m = Math.floor(e / 60);
+            var s = e % 60;
+            el.textContent = String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+        }}, 500);
+    }})();
+    </script>
+    """, unsafe_allow_html=True)
+
     st.info(f"📋 **状況**\n\n{ti['situation'][lv]}")
     st.warning(f"🎯 **ミッション**\n\n{ti['mission'][lv]}")
     st.markdown(f"""<div class="core-info-box">🔑 <strong>核心情報（ピッチに使え）</strong>: {ti['core_info'][lv]}</div>""", unsafe_allow_html=True)
+
     st.write("### 💡 知恵の宝珠（ヒント）")
     for i in range(3):
         if i < st.session_state.hints_unlocked:
@@ -379,70 +434,69 @@ elif st.session_state.scene == 'quest':
                 st.rerun()
         else:
             st.write(f"🔒 ヒント{i+1}（前のヒントを解放せよ）")
-    st.write("")
-    if st.button("⚔️ 準備完了！作戦会議へ"):
-        st.session_state.prep_start = 0
-        st.session_state.scene = 'prep'
-        st.session_state.play_sound = 'select'
-        st.rerun()
 
-# ==========================================
-# 作戦会議
-# ==========================================
-elif st.session_state.scene == 'prep':
-    lv = st.session_state.level; th = st.session_state.theme
-    boss = LEVELS[lv]; ti = THEMES[th]
-    if st.session_state.prep_start == 0:
-        st.session_state.prep_start = time.time()
-    remaining = max(0, int(boss['time'] - (time.time() - st.session_state.prep_start)))
-    st.markdown("## ⏱️ 作戦会議中...")
-    st.markdown("*30秒で何を伝えるか、構成を練れ！*")
-    cid = f"cd_{int(st.session_state.prep_start)}"
-    if remaining > 0:
-        st.markdown(f"""<div id="{cid}" class="countdown">{remaining//60:02d}:{remaining%60:02d}</div>
-        <script>(function(){{let t={remaining};const e=document.getElementById('{cid}');if(!e)return;
-        if(window._cdT)clearInterval(window._cdT);window._cdT=setInterval(()=>{{if(t<=0){{clearInterval(window._cdT);
-        e.style.color='#ef4444';e.textContent='00:00'}}else{{const m=Math.floor(t/60),s=t%60;
-        e.textContent=String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');t--}}}},1000)}})();</script>""", unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="countdown" style="color:#ef4444">00:00</div>', unsafe_allow_html=True)
-        st.success("作戦会議終了！いざ、本番へ！")
-    st.info(f"📋 **状況**\n\n{ti['situation'][lv]}")
-    st.warning(f"🎯 **ミッション**\n\n{ti['mission'][lv]}")
-    st.markdown(f"""<div class="core-info-box">🔑 <strong>核心情報</strong>: {ti['core_info'][lv]}</div>""", unsafe_allow_html=True)
-    st.write("### 💡 知恵の宝珠（ヒント）")
-    for i in range(3):
-        if i < st.session_state.hints_unlocked:
-            st.success(ti['hints'][i])
-        elif i == st.session_state.hints_unlocked:
-            if st.button(f"🔓 ヒント{i+1}を見る", key=f"ph_{i}"):
-                st.session_state.hints_unlocked += 1
-                st.session_state.play_sound = 'hint'
-                st.rerun()
-        else:
-            st.write(f"🔒 ヒント{i+1}（前のヒントを解放せよ）")
     st.write("")
     if st.button("🎤 いざ、本番へ（30秒ピッチ）"):
-        st.session_state.prep_start = 0
+        # ★ 作戦会議タイマー停止・確定
+        st.session_state.prep_time = time.time() - st.session_state.prep_start
+        # ★ ピッチタイマー開始
+        st.session_state.pitch_start = time.time()
+        st.session_state.pitch_time = 0.0
         st.session_state.scene = 'pitch'
         st.session_state.play_sound = 'battle'
         st.rerun()
 
 # ==========================================
-# ピッチ
+# ピッチ（録音）
 # ==========================================
 elif st.session_state.scene == 'pitch':
-    lv = st.session_state.level; th = st.session_state.theme
-    boss = LEVELS[lv]; ti = THEMES[th]
+    lv = st.session_state.level
+    th = st.session_state.theme
+    boss = LEVELS[lv]
+    ti = THEMES[th]
+
     st.markdown(f"## {boss['emoji']} {boss['name']}へのピッチ")
     st.markdown(f"### {ti['title']}")
     st.info(f"📋 **状況**\n\n{ti['situation'][lv]}")
     st.warning(f"🎯 **ミッション**\n\n{ti['mission'][lv]}")
     st.markdown(f"""<div class="core-info-box">🔑 <strong>核心情報</strong>: {ti['core_info'][lv]}<br>
     ⏱️ <strong>30秒</strong>（約150〜175文字）で伝えよ！</div>""", unsafe_allow_html=True)
+
+    # ★ ピッチ経過タイマー（録音開始から）
+    if st.session_state.pitch_start > 0:
+        pitch_elapsed_init = int(time.time() - st.session_state.pitch_start)
+        st.markdown(f"""
+        <div class="timer-label">🎙️ ピッチタイム（計測中）</div>
+        <div id="pitch_timer" class="timer-box">{fmt_time(pitch_elapsed_init)}</div>
+        <script>
+        (function() {{
+            var startEpoch = {st.session_state.pitch_start};
+            var el = document.getElementById('pitch_timer');
+            if (!el) return;
+            if (window._pitchTimer) clearInterval(window._pitchTimer);
+            window._pitchTimer = setInterval(function() {{
+                var e = Math.floor(Date.now() / 1000 - startEpoch);
+                var m = Math.floor(e / 60);
+                var s = e % 60;
+                el.textContent = String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+                if (e >= 30) {{
+                    el.style.color = '#ef4444';
+                    el.style.borderColor = '#ef4444';
+                }}
+            }}, 500);
+        }})();
+        </script>
+        """, unsafe_allow_html=True)
+
     st.write("")
-    audio = mic_recorder(start_prompt="🎙️ 録音開始（30秒ピッチ）", stop_prompt="⏹️ 完了", key='rec')
+    audio = mic_recorder(
+        start_prompt="🎙️ 録音開始（30秒ピッチ）",
+        stop_prompt="⏹️ 完了（ここを押すと計測終了）",
+        key='rec'
+    )
     if audio:
+        # ★ ピッチタイマー停止・確定
+        st.session_state.pitch_time = time.time() - st.session_state.pitch_start
         with st.spinner("🥋 師匠が評価中..."):
             text = transcribe_whisper(audio['bytes'])
             if len(text) < 5:
@@ -452,6 +506,8 @@ elif st.session_state.scene == 'pitch':
                 result = evaluate_pitch(lv, th, text)
                 result['transcript'] = text
                 result['theme'] = th
+                result['prep_time'] = st.session_state.prep_time
+                result['pitch_time'] = st.session_state.pitch_time
                 st.session_state.results.append(result)
                 st.session_state.play_sound = f"result_{result.get('rank','C').lower()}"
                 st.session_state.scene = 'result'
@@ -464,13 +520,24 @@ elif st.session_state.scene == 'result':
     r = st.session_state.results[-1]
     st.markdown("## 🥋 師匠の評価")
     re_ = {"S":"🌟","A":"⭐","B":"✨","C":"💫"}
-    sc = r.get('score',50)
+    sc = r.get('score', 50)
     st.markdown(f"# {re_.get(r['rank'],'✨')} ランク: {r['rank']} ({sc}点)")
+
     c1,c2,c3,c4 = st.columns(4)
     c1.metric("🎯 フック", f"{r.get('hook_score',0)}点")
     c2.metric("🔧 施策", f"{r.get('measure_score',0)}点")
     c3.metric("📊 根拠", f"{r.get('evidence_score',0)}点")
     c4.metric("🏁 着地", f"{r.get('landing_score',0)}点")
+
+    # ★ タイム記録の表示
+    prep_t = r.get('prep_time', 0)
+    pitch_t = r.get('pitch_time', 0)
+    st.markdown(f"""<div class="time-record-box">
+    ⏱️ <strong>タイム記録</strong><br>
+    📝 作戦会議: <strong>{fmt_time(prep_t)}</strong>（{int(prep_t)}秒）　
+    🎙️ ピッチ: <strong>{fmt_time(pitch_t)}</strong>（{int(pitch_t)}秒）
+    </div>""", unsafe_allow_html=True)
+
     st.markdown(f"""<div class="village-elder">
     <p><strong>🎤 汝の言葉:</strong></p><p>{r.get('transcript','')}</p><br>
     <p><strong>✅ 良かった点:</strong></p><p>{r.get('good_points','')}</p><br>
@@ -478,6 +545,7 @@ elif st.session_state.scene == 'result':
     <p><strong>🎯 次回へのアドバイス:</strong></p><p>{r.get('next_tips','')}</p><br>
     <p><strong>💬 師匠の言葉:</strong></p><p>{r.get('comment','精進せよ！')}</p>
     </div>""", unsafe_allow_html=True)
+
     if st.session_state.level < 3:
         if st.button("➡️ 次の強敵へ"):
             st.session_state.level += 1
@@ -495,22 +563,100 @@ elif st.session_state.scene == 'result':
 # ==========================================
 elif st.session_state.scene == 'ending':
     st.markdown("## 👑 修行の成果")
-    scores = [r.get('score',50) for r in st.session_state.results]
-    avg = sum(scores)/len(scores) if scores else 0
-    if avg>=90: title="🌟 提案力の達人"; cmt="見事じゃ！汝の30秒ピッチは一流。お客様の心を30秒で掴む技を手に入れた。自信を持って実戦に挑め！"
-    elif avg>=70: title="⭐ 熟練の提案者"; cmt="良き修行であった。フックの切れ味は十分。施策の具体性と着地の精度をさらに磨けば、必ず達人の域に至る！"
-    elif avg>=50: title="✨ 修行中の弟子"; cmt="まずまずの成果じゃ。シチュエーションの固有名詞と数値をもっと使え。ヒント3の30秒テンプレートを活用して再挑戦せよ！"
-    else: title="💫 見習い弟子"; cmt="まだまだじゃな。されど諦めるな。まずは「お客様の名前と数値」を最初の一文に入れることから始めよ。千里の道も一歩からじゃ！"
+    scores = [r.get('score', 50) for r in st.session_state.results]
+    avg = sum(scores) / len(scores) if scores else 0
+    all_s = all(r.get('rank') == 'S' for r in st.session_state.results)
+
+    if avg >= 90:
+        title = "🌟 提案力の達人"
+        cmt = "見事じゃ！汝の30秒ピッチは一流。お客様の心を30秒で掴む技を手に入れた。自信を持って実戦に挑め！"
+    elif avg >= 70:
+        title = "⭐ 熟練の提案者"
+        cmt = "良き修行であった。フックの切れ味は十分。施策の具体性と着地の精度をさらに磨けば、必ず達人の域に至る！"
+    elif avg >= 50:
+        title = "✨ 修行中の弟子"
+        cmt = "まずまずの成果じゃ。シチュエーションの固有名詞と数値をもっと使え。ヒント3の30秒テンプレートを活用して再挑戦せよ！"
+    else:
+        title = "💫 見習い弟子"
+        cmt = "まだまだじゃな。されど諦めるな。まずは「お客様の名前と数値」を最初の一文に入れることから始めよ。千里の道も一歩からじゃ！"
+
     st.markdown(f"# {title}")
     st.markdown(f"### 総合スコア: {avg:.0f}点")
     st.markdown(f"""<div class="village-elder">
     <p><strong>💬 師匠の総評:</strong></p><p>{cmt}</p><br>
     <p><strong>📊 修行の記録</strong></p></div>""", unsafe_allow_html=True)
+
     for i, r in enumerate(st.session_state.results, 1):
-        ln = LEVELS[i]['name']; tn = r.get('theme','')
+        ln = LEVELS[i]['name']
+        tn = r.get('theme', '')
+        prep_t = r.get('prep_time', 0)
+        pitch_t = r.get('pitch_time', 0)
         st.write(f"**Lv.{i} {ln}** - {tn} : ランク{r.get('rank','-')}（{r.get('score',0)}点）")
         st.write(f"　フック{r.get('hook_score',0)} / 施策{r.get('measure_score',0)} / 根拠{r.get('evidence_score',0)} / 着地{r.get('landing_score',0)}")
+        st.write(f"　⏱️ 作戦会議 {fmt_time(prep_t)} ／ 🎙️ ピッチ {fmt_time(pitch_t)}")
+
     st.write("")
-    if st.button("🔄 もう一度修行する"):
-        st.session_state.update({'scene':'title','level':1,'results':[],'hints_unlocked':0,'prep_start':0,'play_sound':'start'})
+    col_main, col_secret = st.columns([6, 1])
+    with col_main:
+        if st.button("🔄 もう一度修行する"):
+            st.session_state.update({
+                'scene': 'title', 'level': 1, 'results': [],
+                'hints_unlocked': 0, 'prep_start': 0.0, 'prep_time': 0.0,
+                'pitch_start': 0.0, 'pitch_time': 0.0, 'play_sound': 'start'
+            })
+            st.rerun()
+
+    # ★ 全レベルSランクで隠しボタン出現
+    with col_secret:
+        if all_s:
+            st.markdown('<div class="secret-btn">', unsafe_allow_html=True)
+            if st.button("★", key="secret_door"):
+                st.session_state.scene = 'secret_ending'
+                st.session_state.play_sound = 'secret'
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+
+# ==========================================
+# 隠しエンディング（全Sランク達成者のみ）
+# ==========================================
+elif st.session_state.scene == 'secret_ending':
+    st.markdown("""
+    <style>
+    .main { background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%) !important; }
+    .secret-title { font-family: 'Press Start 2P', cursive; font-size: 20px; color: #fbbf24;
+      text-align: center; text-shadow: 0 0 20px #fbbf24, 0 0 40px #f59e0b; margin: 20px 0; line-height: 2; }
+    .secret-msg { background: rgba(0,0,0,0.7); border: 2px solid #fbbf24;
+      border-radius: 12px; padding: 24px; margin: 20px 0; font-size: 16px;
+      line-height: 2; color: #fef3c7; text-align: center; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="secret-title">✨ 隠しエンディング ✨<br>〜 真の達人へ 〜</div>', unsafe_allow_html=True)
+
+    # ★ 音楽ファイル（secret_ending_music.mp3 を同ディレクトリに配置）
+    music_path = "secret_ending_music.mp3"
+    if os.path.exists(music_path):
+        with open(music_path, "rb") as f:
+            st.audio(f.read(), format="audio/mp3", autoplay=True)
+    else:
+        st.info("🎵 BGMファイル（secret_ending_music.mp3）をアプリと同じフォルダに配置してください。")
+
+    # ★ 画像ファイル（secret_ending_image.png / .jpg を同ディレクトリに配置）
+    for img_name in ["secret_ending_image.png", "secret_ending_image.jpg", "secret_ending_image.jpeg"]:
+        if os.path.exists(img_name):
+            st.image(img_name, use_container_width=True)
+            break
+    else:
+        st.info("🖼️ 画像ファイル（secret_ending_image.png）をアプリと同じフォルダに配置してください。")
+
+    st.markdown("""<div class="secret-msg">
+    全レベル S ランク達成。<br><br>
+    汝はただの提案者ではない。<br>
+    30秒で、人の心を動かす者だ。<br><br>
+    師匠として誇りに思う。<br>
+    これからも、言葉を磨き続けよ。
+    </div>""", unsafe_allow_html=True)
+
+    if st.button("🔙 結果に戻る"):
+        st.session_state.scene = 'ending'
         st.rerun()
