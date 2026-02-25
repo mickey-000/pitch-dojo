@@ -245,24 +245,48 @@ S (90-100) / A (70-89) / B (50-69) / C (0-49)
   "comment": "師匠の温かい励まし（50文字程度）"
 }}"""
 
-    for attempt in range(3):
-        try:
-            resp = genai_client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
-            cj = resp.text.replace('```json','').replace('```','').strip()
-            r = json.loads(cj)
-            r.setdefault('score', 50)
-            r.setdefault('rank', 'B')
-            return r
-        except Exception as e:
-            if '429' in str(e) and attempt < 2:
-                time.sleep(10)
-                continue
-            return {"score":0,"rank":"C","hook_score":0,"measure_score":0,
-                    "evidence_score":0,"landing_score":0,
-                    "good_points":"システムエラーが発生した。",
-                    "improvements":"もう一度挑戦せよ。",
-                    "next_tips":"再度試してみよ。",
-                    "comment":f"エラー: {e}"}
+    # 試すモデルのリスト（順番にフォールバック）
+    models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-8b']
+    # リトライ間隔（秒）: 1回目15秒待ち、2回目30秒待ち
+    wait_times = [15, 30]
+
+    for model in models:
+        for attempt in range(3):
+            try:
+                resp = genai_client.models.generate_content(model=model, contents=prompt)
+                cj = resp.text.replace('```json','').replace('```','').strip()
+                r = json.loads(cj)
+                r.setdefault('score', 50)
+                r.setdefault('rank', 'B')
+                return r
+            except Exception as e:
+                err_str = str(e)
+                if '429' in err_str or 'RESOURCE_EXHAUSTED' in err_str:
+                    if attempt < 2:
+                        wait = wait_times[attempt]
+                        st.toast(f"⏳ APIが混み合っています。{wait}秒後に再試行します…（モデル: {model}）")
+                        time.sleep(wait)
+                        continue
+                    else:
+                        # このモデルで3回失敗 → 次のモデルへ
+                        st.toast(f"⚠️ {model} での取得に失敗。別モデルで再試行します…")
+                        break
+                else:
+                    # 429以外のエラーは即リターン
+                    return {"score":0,"rank":"C","hook_score":0,"measure_score":0,
+                            "evidence_score":0,"landing_score":0,
+                            "good_points":"システムエラーが発生した。",
+                            "improvements":"もう一度挑戦せよ。",
+                            "next_tips":"再度試してみよ。",
+                            "comment":f"エラー: {e}"}
+
+    # 全モデル・全リトライ失敗
+    return {"score":0,"rank":"C","hook_score":0,"measure_score":0,
+            "evidence_score":0,"landing_score":0,
+            "good_points":"APIが混み合っておる。少し間を置いて再挑戦せよ。",
+            "improvements":"時間をおいてもう一度挑戦してみよ。",
+            "next_tips":"再度試してみよ。",
+            "comment":"APIの限界じゃ。しばし休憩して再挑戦せよ！"}
 
 # ==========================================
 # 時間フォーマット
