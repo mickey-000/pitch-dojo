@@ -323,6 +323,7 @@ if 'scene' not in st.session_state:
         'prep_time': 0.0,       # 確定した作戦会議時間（秒）
         'pitch_start': 0.0,     # ピッチタイマー開始時刻
         'pitch_time': 0.0,      # 確定したピッチ時間（秒）
+        'pitch_recording': False,  # 録音開始ボタンを押したか
         # -----------------
         'results': [],
         'transcript': '',
@@ -439,9 +440,10 @@ elif st.session_state.scene == 'quest':
     if st.button("🎤 いざ、本番へ（30秒ピッチ）"):
         # ★ 作戦会議タイマー停止・確定
         st.session_state.prep_time = time.time() - st.session_state.prep_start
-        # ★ ピッチタイマー開始
-        st.session_state.pitch_start = time.time()
+        # ★ ピッチタイマーはまだ開始しない（録音開始ボタンを押すまで待つ）
+        st.session_state.pitch_start = 0.0
         st.session_state.pitch_time = 0.0
+        st.session_state.pitch_recording = False
         st.session_state.scene = 'pitch'
         st.session_state.play_sound = 'battle'
         st.rerun()
@@ -462,8 +464,23 @@ elif st.session_state.scene == 'pitch':
     st.markdown(f"""<div class="core-info-box">🔑 <strong>核心情報</strong>: {ti['core_info'][lv]}<br>
     ⏱️ <strong>30秒</strong>（約150〜175文字）で伝えよ！</div>""", unsafe_allow_html=True)
 
-    # ★ ピッチ経過タイマー（録音開始から）
-    if st.session_state.pitch_start > 0:
+    st.write("")
+
+    # ★ STEP1: 録音開始ボタンを押すまでの待機状態
+    if not st.session_state.pitch_recording:
+        st.markdown("""<div style="background:rgba(251,191,36,.1);border:2px dashed #fbbf24;
+        border-radius:8px;padding:14px;text-align:center;font-size:15px;margin-bottom:12px;">
+        🎙️ 準備ができたら下のボタンを押せ。<br>
+        <strong>ボタンを押した瞬間からピッチタイムの計測が始まる。</strong>
+        </div>""", unsafe_allow_html=True)
+        if st.button("🎙️ 録音開始 ＆ タイマースタート"):
+            # ★ このタイミングで pitch_start を記録
+            st.session_state.pitch_start = time.time()
+            st.session_state.pitch_recording = True
+            st.rerun()
+
+    # ★ STEP2: 録音開始ボタンを押した後 → タイマー表示 ＆ mic_recorder
+    else:
         pitch_elapsed_init = int(time.time() - st.session_state.pitch_start)
         st.markdown(f"""
         <div class="timer-label">🎙️ ピッチタイム（計測中）</div>
@@ -488,30 +505,33 @@ elif st.session_state.scene == 'pitch':
         </script>
         """, unsafe_allow_html=True)
 
-    st.write("")
-    audio = mic_recorder(
-        start_prompt="🎙️ 録音開始（30秒ピッチ）",
-        stop_prompt="⏹️ 完了（ここを押すと計測終了）",
-        key='rec'
-    )
-    if audio:
-        # ★ ピッチタイマー停止・確定
-        st.session_state.pitch_time = time.time() - st.session_state.pitch_start
-        with st.spinner("🥋 師匠が評価中..."):
-            text = transcribe_whisper(audio['bytes'])
-            if len(text) < 5:
-                st.warning("声が聞こえぬぞ、弟子よ...")
-            else:
-                st.session_state.transcript = text
-                result = evaluate_pitch(lv, th, text)
-                result['transcript'] = text
-                result['theme'] = th
-                result['prep_time'] = st.session_state.prep_time
-                result['pitch_time'] = st.session_state.pitch_time
-                st.session_state.results.append(result)
-                st.session_state.play_sound = f"result_{result.get('rank','C').lower()}"
-                st.session_state.scene = 'result'
-                st.rerun()
+        st.markdown("""<div style="text-align:center;font-size:14px;color:#a3e635;margin-bottom:8px;">
+        ↓ マイクボタンを押して話し始め、終わったら停止ボタンを押せ</div>""", unsafe_allow_html=True)
+
+        audio = mic_recorder(
+            start_prompt="🔴 マイクON（話し始めよ）",
+            stop_prompt="⏹️ 停止（計測終了）",
+            key='rec'
+        )
+        if audio:
+            # ★ ピッチタイマー停止・確定（停止ボタンを押した瞬間）
+            st.session_state.pitch_time = time.time() - st.session_state.pitch_start
+            st.session_state.pitch_recording = False
+            with st.spinner("🥋 師匠が評価中..."):
+                text = transcribe_whisper(audio['bytes'])
+                if len(text) < 5:
+                    st.warning("声が聞こえぬぞ、弟子よ...")
+                else:
+                    st.session_state.transcript = text
+                    result = evaluate_pitch(lv, th, text)
+                    result['transcript'] = text
+                    result['theme'] = th
+                    result['prep_time'] = st.session_state.prep_time
+                    result['pitch_time'] = st.session_state.pitch_time
+                    st.session_state.results.append(result)
+                    st.session_state.play_sound = f"result_{result.get('rank','C').lower()}"
+                    st.session_state.scene = 'result'
+                    st.rerun()
 
 # ==========================================
 # 評価結果
