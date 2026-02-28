@@ -174,26 +174,37 @@ def transcribe_whisper(audio_bytes):
 # ==========================================
 # 師匠の評価（2ステップ Chain-of-Thought）
 # ==========================================
-def evaluate_pitch(level, theme, transcript):
+def evaluate_pitch(level, theme, transcript, pitch_time=0):
     li = LEVELS[level]
     ti = THEMES[theme]
 
-    # ── STEP 1: 発言から証拠を引用させる ──────────────────
-    step1_prompt = f"""あなたは採点官です。以下の弟子の発言を読み、各項目について発言中から該当する表現を「そのまま引用」してください。
+    # ── STEP 1: 証拠引用 ＋ 関連性チェック ──────────────────
+    step1_prompt = f"""あなたは採点官です。以下の弟子の発言を読み、2つのことを行ってください。
 
 【弟子の発言】
 {transcript}
 
-【シチュエーション（参考）】
+【お題のシチュエーション】
 {ti['situation'][level]}
-核心情報: {ti['core_info'][level]}
+【核心キーワード】（このお題で本来使うべき固有名詞・数値）
+{ti['core_info'][level]}
 
-以下のJSON形式で、各項目の引用を返してください。該当する表現がなければ「なし」と書いてください。
+【タスク1: 関連性チェック】
+弟子の発言が、上記のシチュエーション・核心キーワードに関連した内容かどうかを判定してください。
+- 核心キーワードの語句・数値・固有名詞が1つ以上使われていれば「relevant」
+- 全く別のテーマの話をしている、または核心キーワードが1つも使われていなければ「off_topic」
+
+【タスク2: 証拠の引用】
+発言中から各項目の該当箇所をそのまま引用してください。該当なければ「なし」と書いてください。
+
+以下のJSON形式で返してください：
 {{
-  "hook_quote": "フック・課題把握に該当する発言の引用（固有名詞・数値・相手の痛みを示す箇所）",
-  "measure_quote": "施策の具体性に該当する発言の引用（何を・どうするかの動作を示す箇所）",
-  "evidence_quote": "根拠・数値の活用に該当する発言の引用（固有名詞・数値・データを示す箇所）",
-  "landing_quote": "着地・効果に該当する発言の引用（定量効果・状態変化を示す箇所）"
+  "relevance": "relevant または off_topic",
+  "relevant_keywords_found": "発言中で使われていた核心キーワードをリストで（例: 4件、Excel、ホワイトボード）",
+  "hook_quote": "フック・課題把握に該当する引用",
+  "measure_quote": "施策の具体性に該当する引用",
+  "evidence_quote": "根拠・数値の活用に該当する引用",
+  "landing_quote": "着地・効果に該当する引用"
 }}"""
 
     step1_result = None
@@ -202,7 +213,7 @@ def evaluate_pitch(level, theme, transcript):
             resp1 = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "発言から該当箇所を引用するだけです。必ずJSON形式のみで返答してください。"},
+                    {"role": "system", "content": "発言の証拠引用と関連性チェックを行います。必ずJSON形式のみで返答してください。"},
                     {"role": "user", "content": step1_prompt}
                 ],
                 response_format={"type": "json_object"},
@@ -222,7 +233,19 @@ def evaluate_pitch(level, theme, transcript):
                     "next_tips":"再度試してみよ。",
                     "comment":f"エラー: {e}"}
 
-    # ── STEP 2: 引用した証拠をもとに採点させる ────────────
+    # ── 関連性チェック: off_topicなら即座にCランク ────────────
+    if step1_result.get('relevance') == 'off_topic':
+        return {"score": 20, "rank": "C",
+                "hook_score": 5, "measure_score": 5,
+                "evidence_score": 5, "landing_score": 5,
+                "good_points": "お題のシチュエーションに関係のない内容が話されていた。",
+                "improvements": "お題の核心キーワード（" + ti['core_info'][level] + "）を必ず発言に盛り込め。",
+                "next_tips": "まず核心情報の固有名詞・数値を最初の一文に入れることから始めよ。",
+                "comment": "弟子よ、お題の内容から話が離れておるぞ。核心情報を使え！",
+                "time_penalty": 0,
+                "relevance_warning": True}
+
+    # ── STEP 2: 証拠をもとに採点 ────────────────────────────
     step2_prompt = f"""あなたは提案力道場の師匠です。採点官が引用した証拠をもとに、以下のルールで採点してください。
 
 【採点対象の発言】
@@ -244,6 +267,7 @@ def evaluate_pitch(level, theme, transcript):
 - 15点: 部門名・人名などの固有名詞はあるが、シチュエーション固有の数値がなく課題の深刻さが伝わらない
   　例×「営業部と生産管理部の連携がうまくいっておらず、仕様変更が伝わらない」← 部門名はあるが数値ゼロ→15点
 - 10点: 一般的な課題認識（固有名詞も数値もない）
+  　例×「御社の納期遵守率が低く、主要なお取引先を失うリスクがある」← 91%・F社・G社・2.7億などの数値・社名が一切ない→10点
 - 5点: 課題の特定が曖昧
 - 0点: フックなし
 
@@ -253,9 +277,9 @@ def evaluate_pitch(level, theme, transcript):
 - 20点: 解決の方向性と対象は明確だが「何が起きるか」の動作結果がやや薄い
 - 15点: やりたいことの方向性は伝わるが具体的な動作・仕組みが不明確
   　例×「見積の自動化を進める。まずは標準品から着手」← 何をどう自動化するかが不明→15点
-- 10点: バズワードのみで動作説明なし（以下は必ず10点とせよ）
-  　例×「システムを統合して情報共有をリアルタイムにする」←「システム統合」「リアルタイム共有」はバズワード→10点
-  　例×「見える化する」「DXを推進する」「効率化を図る」← すべて10点以下
+- 10点: バズワードのみで動作説明なし（以下は必ず10点）
+  　例×「システムを統合して情報共有をリアルタイムにする」→10点
+  　例×「サプライチェーンの管理を強化する」「管理方法を統一する」「見える化する」→10点
 - 5点: 一般論（「改善する」「対策を打つ」）
 - 0点: 施策への言及なし
 
@@ -263,10 +287,10 @@ def evaluate_pitch(level, theme, transcript):
 - 25点: シチュエーション固有の数値・固有名詞が2種類以上あり、提案内容と因果でつながっている
   　例○「Excel・ホワイトボード・紙台帳のバラバラな管理（原因）→ 一元化（解決）」と因果が明確→25点
 - 20点: 固有名詞・数値が複数あるが提案との因果が一言で薄い
-  　例△「S社／4,000万円／5営業日」の数値はあるが「自動化すれば短縮できる」と因果が弱い→20点
-- 15点: 部門名・人名など固有名詞はあるが、シチュエーション固有の数値（金額・件数・時間等）がない（以下は必ず15点以下とせよ）
-  　例×「営業部と生産管理部の連携がうまくいっていない」← 30台誤生産・150万円などの核心数値ゼロ→15点
-- 10点: シチュエーションへの言及が一般的で固有名詞もほぼない
+- 15点: 部門名・人名など固有名詞はあるが、シチュエーション固有の数値（金額・件数・%等）がない
+  　例×「営業部と生産管理部の連携がうまくいっていない」← 30台誤生産・150万円などの数値ゼロ→15点
+- 10点: シチュエーションへの言及が一般的（固有名詞も数値もほぼない）
+  　例×「納期遵守率が低く、取引先を失うリスク」← 91%、H社98%、F社、G社、2.7億などが一切ない→10点
 - 5点: ほぼ触れていない
 - 0点: 完全に一般論
 
@@ -276,17 +300,18 @@ def evaluate_pitch(level, theme, transcript):
 - 20点: 定量的数値 OR 状態変化のどちらか一方のみ
   　例△「来期までに2営業日以内を目指す」← 数値目標のみ、状態変化の記述がない→20点
 - 15点: 効果の方向性はあるが数値も状態変化も曖昧
-- 10点: 「〜できると思います」「〜はずです」「〜でしょう」など推量・希望の表現（以下は必ず10点とせよ）
-  　例×「ご生産のようなミスは減らせると思います」←「思います」は推量であり断言でない→10点
+  　例△「将来への投資に回す」「削減分を成長に使う」← 方向性はあるが定量も状態変化も弱い→15点
+- 10点: 「〜できると思います」「〜はずです」「〜でしょう」など推量・希望の表現（必ず10点）
+  　例×「減らせると思います」「よいはずです」「改善できるのでは」← 断言でない→10点
 - 5点: 効果がほぼ不明
 - 0点: 効果への言及なし
 
 【重要ルール】
 - 引用が「なし」の項目は0〜5点とせよ
-- 引用がある項目は、その引用内容を上記ルールに照らして機械的に採点せよ
-- 印象・全体感・「なんとなく」での減点は禁止
+- 上記の「必ず×点」と明示された例と同等の発言は、迷わずその点数とせよ
+- 印象・全体感での加点は禁止。定義を機械的に適用せよ
 - scoreはhook_score + measure_score + evidence_score + landing_scoreの合計と必ず一致させよ
-- rankはS(90-100) / A(70-89) / B(50-69) / C(0-49)
+- rankはS(90-100) / A(70-89) / B(51-69) / C(0-50) ※50点以下はC
 
 以下のJSON形式のみで返してください：
 {{
@@ -315,15 +340,34 @@ def evaluate_pitch(level, theme, transcript):
             )
             cj = resp2.choices[0].message.content.strip()
             r = json.loads(cj)
-            # score と各項目の合計が一致しない場合は再計算
-            calc = (r.get('hook_score',0) + r.get('measure_score',0)
-                    + r.get('evidence_score',0) + r.get('landing_score',0))
-            r['score'] = calc
-            if calc >= 90:   r['rank'] = 'S'
-            elif calc >= 70: r['rank'] = 'A'
-            elif calc >= 50: r['rank'] = 'B'
-            else:            r['rank'] = 'C'
+
+            # ── Python側で合計・ランクを強制再計算 ────────────
+            calc = (r.get('hook_score', 0) + r.get('measure_score', 0)
+                    + r.get('evidence_score', 0) + r.get('landing_score', 0))
+
+            # ── ⏱️ 時間ペナルティ（40秒超で減点）────────────────
+            time_penalty = 0
+            if pitch_time > 60:
+                time_penalty = 15
+            elif pitch_time > 50:
+                time_penalty = 10
+            elif pitch_time > 40:
+                time_penalty = 5
+            final_score = max(0, calc - time_penalty)
+
+            # ── ランク判定（50点以下はC）─────────────────────
+            if final_score >= 90:   rank = 'S'
+            elif final_score >= 70: rank = 'A'
+            elif final_score >= 51: rank = 'B'
+            else:                   rank = 'C'
+
+            r['score'] = final_score
+            r['rank'] = rank
+            r['time_penalty'] = time_penalty
+            r['relevance_warning'] = False
+            r['keywords_found'] = step1_result.get('relevant_keywords_found', '')
             return r
+
         except Exception as e:
             err_str = str(e)
             if ('429' in err_str or 'rate_limit' in err_str.lower()) and attempt < 2:
@@ -331,13 +375,13 @@ def evaluate_pitch(level, theme, transcript):
                 st.toast(f"⏳ APIが混み合っています。{wait}秒後に再試行します…")
                 time.sleep(wait)
                 continue
-            return {"score":0,"rank":"C","hook_score":0,"measure_score":0,
-                    "evidence_score":0,"landing_score":0,
-                    "good_points":"システムエラーが発生した。",
-                    "improvements":"もう一度挑戦せよ。",
-                    "next_tips":"再度試してみよ。",
-                    "comment":f"エラー: {e}"}
-
+            return {"score": 0, "rank": "C", "hook_score": 0, "measure_score": 0,
+                    "evidence_score": 0, "landing_score": 0,
+                    "good_points": "システムエラーが発生した。",
+                    "improvements": "もう一度挑戦せよ。",
+                    "next_tips": "再度試してみよ。",
+                    "comment": f"エラー: {e}",
+                    "time_penalty": 0, "relevance_warning": False}
 # ==========================================
 # 時間フォーマット
 # ==========================================
@@ -597,7 +641,7 @@ elif st.session_state.scene == 'pitch':
                     st.warning("声が聞こえぬぞ、弟子よ...")
                 else:
                     st.session_state.transcript = text
-                    result = evaluate_pitch(lv, th, text)
+                    result = evaluate_pitch(lv, th, text, st.session_state.pitch_time)
                     result['transcript'] = text
                     result['theme'] = th
                     result['prep_time'] = st.session_state.prep_time
@@ -626,11 +670,32 @@ elif st.session_state.scene == 'result':
     # ★ タイム記録の表示
     prep_t = r.get('prep_time', 0)
     pitch_t = r.get('pitch_time', 0)
+    time_penalty = r.get('time_penalty', 0)
+
+    if pitch_t > 60:
+        pitch_color = "#ef4444"; pitch_label = " ⚠️超過（-15点）"
+    elif pitch_t > 50:
+        pitch_color = "#f97316"; pitch_label = " ⚠️超過（-10点）"
+    elif pitch_t > 40:
+        pitch_color = "#fbbf24"; pitch_label = " ⚠️超過（-5点）"
+    elif pitch_t <= 35:
+        pitch_color = "#a3e635"; pitch_label = " ✅短め"
+    else:
+        pitch_color = "#4ade80"; pitch_label = " ✅適正"
+
+    penalty_text = f"　<span style='color:#ef4444;font-weight:bold;'>⚠️ 時間超過ペナルティ: -{time_penalty}点</span>" if time_penalty > 0 else ""
+
     st.markdown(f"""<div class="time-record-box">
     ⏱️ <strong>タイム記録</strong><br>
     📝 作戦会議: <strong>{fmt_time(prep_t)}</strong>（{int(prep_t)}秒）　
-    🎙️ ピッチ: <strong>{fmt_time(pitch_t)}</strong>（{int(pitch_t)}秒）
+    🎙️ ピッチ: <strong style="color:{pitch_color}">{fmt_time(pitch_t)}</strong>（{int(pitch_t)}秒）{pitch_label}{penalty_text}<br>
+    <small style="color:#a3a3a3;">※目標: 30秒以内。40秒超で-5点 / 50秒超で-10点 / 60秒超で-15点</small>
     </div>""", unsafe_allow_html=True)
+
+    if r.get('relevance_warning'):
+        st.error("⚠️ **お題との関連性が低い発言です。** シチュエーションの固有名詞・数値をピッチに必ず盛り込んでください。")
+    elif r.get('keywords_found'):
+        st.success(f"✅ **使用できた核心キーワード:** {r.get('keywords_found')}")
 
     st.markdown(f"""<div class="village-elder">
     <p><strong>🎤 汝の言葉:</strong></p><p>{r.get('transcript','')}</p><br>
