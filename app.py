@@ -172,39 +172,84 @@ def transcribe_whisper(audio_bytes):
         return ""
 
 # ==========================================
-# 師匠の評価（2ステップ Chain-of-Thought）
+# 師匠の評価（ハイブリッド方式）
 # ==========================================
+
+def _calc_evidence_score(transcript, core_info):
+    """根拠スコアをPythonで機械的に算出する。
+    core_infoから抽出したキーワードが発言中にいくつ含まれるかを数えて採点。
+    AIに任せず完全にルールベースで判定する。"""
+    import re
+    # core_infoを「/」「・」「,」「、」で分割してキーワードリストを作成
+    raw = re.split(r'[/・,、]', core_info)
+    keywords = [k.strip() for k in raw if k.strip()]
+    
+    found = []
+    for kw in keywords:
+        # 数値を含む短い語（例: "4件", "150万円", "10日"）も検出できるよう部分一致
+        if kw in transcript:
+            found.append(kw)
+    
+    count = len(found)
+    if count >= 3:
+        score = 25
+    elif count == 2:
+        score = 20
+    elif count == 1:
+        score = 15
+    else:
+        score = 0
+    
+    return score, found
+
+
+def _has_numeric(text):
+    """テキスト中に数値表現（数字・%・万・億・件・日・倍等）が含まれるか判定"""
+    import re
+    return bool(re.search(r'[0-9０-９][^。]*[%％万億件日分時間倍点]|[0-9０-９]+', text))
+
+
 def evaluate_pitch(level, theme, transcript, pitch_time=0):
     li = LEVELS[level]
     ti = THEMES[theme]
 
-    # ── STEP 1: 証拠引用 ＋ 関連性チェック ──────────────────
-    step1_prompt = f"""あなたは採点官です。以下の弟子の発言を読み、2つのことを行ってください。
+    # ══════════════════════════════════════════════
+    # Python事前処理①: 根拠スコアを機械的に算出
+    # ══════════════════════════════════════════════
+    evidence_score, found_keywords = _calc_evidence_score(transcript, ti['core_info'][level])
+
+    # ══════════════════════════════════════════════
+    # Python事前処理②: 着地の数値有無フラグ
+    # ══════════════════════════════════════════════
+    landing_has_number = _has_numeric(transcript[-60:]) if len(transcript) > 60 else _has_numeric(transcript)
+    # 着地部分（最後の60文字）に数値があるかどうか → AIへのヒントとして渡す
+
+    # ══════════════════════════════════════════════
+    # STEP 1: 証拠引用 ＋ 関連性チェック
+    # ══════════════════════════════════════════════
+    step1_prompt = f"""以下の弟子の発言を読み、2つのことを行ってください。
 
 【弟子の発言】
 {transcript}
 
 【お題のシチュエーション】
 {ti['situation'][level]}
-【核心キーワード】（このお題で本来使うべき固有名詞・数値）
+【核心キーワード】
 {ti['core_info'][level]}
 
 【タスク1: 関連性チェック】
-弟子の発言が、上記のシチュエーション・核心キーワードに関連した内容かどうかを判定してください。
-- 核心キーワードの語句・数値・固有名詞が1つ以上使われていれば「relevant」
-- 全く別のテーマの話をしている、または核心キーワードが1つも使われていなければ「off_topic」
+核心キーワードの語句・数値・固有名詞が1つ以上使われていれば "relevant"、
+全く使われていなければ "off_topic" と判定してください。
 
-【タスク2: 証拠の引用】
-発言中から各項目の該当箇所をそのまま引用してください。該当なければ「なし」と書いてください。
+【タスク2: フック・施策・着地の証拠引用】
+発言中から該当箇所をそのまま引用してください。該当なければ「なし」と書いてください。
 
 以下のJSON形式で返してください：
 {{
   "relevance": "relevant または off_topic",
-  "relevant_keywords_found": "発言中で使われていた核心キーワードをリストで（例: 4件、Excel、ホワイトボード）",
-  "hook_quote": "フック・課題把握に該当する引用",
-  "measure_quote": "施策の具体性に該当する引用",
-  "evidence_quote": "根拠・数値の活用に該当する引用",
-  "landing_quote": "着地・効果に該当する引用"
+  "hook_quote": "フック（固有名詞・数値・相手の痛みを示す箇所）の引用",
+  "measure_quote": "施策（何を・どうするかの動作を示す箇所）の引用",
+  "landing_quote": "着地（効果・変化を示す箇所）の引用"
 }}"""
 
     step1_result = None
@@ -213,7 +258,7 @@ def evaluate_pitch(level, theme, transcript, pitch_time=0):
             resp1 = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "発言の証拠引用と関連性チェックを行います。必ずJSON形式のみで返答してください。"},
+                    {"role": "system", "content": "証拠引用と関連性チェックを行います。JSON形式のみで返答してください。"},
                     {"role": "user", "content": step1_prompt}
                 ],
                 response_format={"type": "json_object"},
@@ -226,14 +271,15 @@ def evaluate_pitch(level, theme, transcript, pitch_time=0):
             if ('429' in err_str or 'rate_limit' in err_str.lower()) and attempt < 2:
                 time.sleep((attempt + 1) * 10)
                 continue
-            return {"score":0,"rank":"C","hook_score":0,"measure_score":0,
-                    "evidence_score":0,"landing_score":0,
-                    "good_points":"Step1でエラーが発生した。",
-                    "improvements":"もう一度挑戦せよ。",
-                    "next_tips":"再度試してみよ。",
-                    "comment":f"エラー: {e}"}
+            return {"score": 0, "rank": "C", "hook_score": 0, "measure_score": 0,
+                    "evidence_score": 0, "landing_score": 0,
+                    "good_points": "Step1でエラーが発生した。",
+                    "improvements": "もう一度挑戦せよ。",
+                    "next_tips": "再度試してみよ。",
+                    "comment": f"エラー: {e}",
+                    "time_penalty": 0, "relevance_warning": False}
 
-    # ── 関連性チェック: off_topicなら即座にCランク ────────────
+    # off_topic判定
     if step1_result.get('relevance') == 'off_topic':
         return {"score": 20, "rank": "C",
                 "hook_score": 5, "measure_score": 5,
@@ -242,88 +288,74 @@ def evaluate_pitch(level, theme, transcript, pitch_time=0):
                 "improvements": "お題の核心キーワード（" + ti['core_info'][level] + "）を必ず発言に盛り込め。",
                 "next_tips": "まず核心情報の固有名詞・数値を最初の一文に入れることから始めよ。",
                 "comment": "弟子よ、お題の内容から話が離れておるぞ。核心情報を使え！",
-                "time_penalty": 0,
-                "relevance_warning": True}
+                "time_penalty": 0, "relevance_warning": True,
+                "keywords_found": ""}
 
-    # ── STEP 2: 証拠をもとに採点 ────────────────────────────
-    step2_prompt = f"""あなたは提案力道場の師匠です。採点官が引用した証拠をもとに、以下のルールで採点してください。
+    # ══════════════════════════════════════════════
+    # STEP 2: フック・施策・着地の採点（AIに任せる3項目）
+    # ══════════════════════════════════════════════
+    landing_hint = "（発言の末尾に数値表現あり）" if landing_has_number else "（発言の末尾に数値表現なし → 25点は不可）"
+
+    step2_prompt = f"""あなたは提案力道場の採点官です。以下の証拠引用をもとに、フック・施策・着地の3項目を採点してください。
 
 【採点対象の発言】
 {transcript}
 
-【採点官が引用した証拠】
-- フック（固有名詞・数値・相手の痛み）: {step1_result.get('hook_quote','なし')}
-- 施策（何を・どうするかの動作）: {step1_result.get('measure_quote','なし')}
-- 根拠（固有名詞・数値・データ）: {step1_result.get('evidence_quote','なし')}
-- 着地（定量効果・状態変化）: {step1_result.get('landing_quote','なし')}
+【証拠引用】
+- フック: {step1_result.get('hook_quote', 'なし')}
+- 施策: {step1_result.get('measure_quote', 'なし')}
+- 着地: {step1_result.get('landing_quote', 'なし')} {landing_hint}
 
-【採点ルール（各25点・6段階）＋境界判定の具体例】
+【採点基準】
 
-■ フック（引用: {step1_result.get('hook_quote','なし')}）
-- 25点: 固有名詞＋数値＋お客様目線の言い換えがすべて揃っている
-  　例○「部長、今四半期4件の遅延、調達部の入荷遅れが製造部・品管部へ波及する同じパターンです」
-- 20点: 固有名詞・数値は使っているがお客様目線の言い換えが弱い
-  　例△「S社に負けて今期4,000万円の失注が出ているとお聞きしています」← 数値はあるが痛みの言い換えが薄い
-- 15点: 部門名・人名などの固有名詞はあるが、シチュエーション固有の数値がなく課題の深刻さが伝わらない
-  　例×「営業部と生産管理部の連携がうまくいっておらず、仕様変更が伝わらない」← 部門名はあるが数値ゼロ→15点
-- 10点: 一般的な課題認識（固有名詞も数値もない）
-  　例×「御社の納期遵守率が低く、主要なお取引先を失うリスクがある」← 91%・F社・G社・2.7億などの数値・社名が一切ない→10点
-- 5点: 課題の特定が曖昧
-- 0点: フックなし
+■ フック（引用: {step1_result.get('hook_quote', 'なし')}）
+25点: 固有名詞＋数値＋お客様目線の言い換えが3つ揃っている
+  例○「部長、今四半期4件の遅延、調達部の入荷遅れが製造部・品管部へ波及する同じパターンです」
+20点: 固有名詞・数値はあるがお客様目線の言い換えが弱い
+  例△「S社に負けて4,000万円の失注が出ているとお聞きしています」
+15点: 部門名・人名などの固有名詞はあるが数値がない
+  例×「営業部と生産管理部の連携がうまくいっていない」
+10点: 固有名詞も数値もなく課題が一般的
+5点: 課題の特定が曖昧
+0点: フックなし
 
-■ 施策（引用: {step1_result.get('measure_quote','なし')}）
-- 25点: 「何を対象に・何をすると・何が起きる」という動作の流れが明確に示されている
-  　例○「3部門の進捗を一画面で管理し、入荷遅れが発生した瞬間に全部門へ即時通知が届く仕組み」
-- 20点: 解決の方向性と対象は明確だが「何が起きるか」の動作結果がやや薄い
-- 15点: やりたいことの方向性は伝わるが具体的な動作・仕組みが不明確
-  　例×「見積の自動化を進める。まずは標準品から着手」← 何をどう自動化するかが不明→15点
-- 10点: バズワードのみで動作説明なし（以下は必ず10点）
-  　例×「システムを統合して情報共有をリアルタイムにする」→10点
-  　例×「サプライチェーンの管理を強化する」「管理方法を統一する」「見える化する」→10点
-- 5点: 一般論（「改善する」「対策を打つ」）
-- 0点: 施策への言及なし
+■ 施策（引用: {step1_result.get('measure_quote', 'なし')}）
+25点: 「何を対象に・何をすると・何が起きる」の動作の流れが明確
+  例○「3部門の進捗を一画面で管理し、入荷遅れの瞬間に全部門へ通知が届く仕組み」
+20点: 解決の方向性と対象は明確だが動作の結果がやや薄い
+  例△「マニュアルを作成して副担当をつける」← 動作は明確だが何が起きるかの描写がない
+15点: やりたいことは伝わるが動作・仕組みが不明確
+  例×「見積の自動化を進める」「情報共有を改善する」
+10点: バズワードのみ（「見える化」「リアルタイム共有」「システム統合」等）
+5点: 一般論
+0点: 施策への言及なし
 
-■ 根拠（引用: {step1_result.get('evidence_quote','なし')}）
-- 25点: シチュエーション固有の数値・固有名詞が2種類以上あり、提案内容と因果でつながっている
-  　例○「Excel・ホワイトボード・紙台帳のバラバラな管理（原因）→ 一元化（解決）」と因果が明確→25点
-- 20点: 固有名詞・数値が複数あるが提案との因果が一言で薄い
-- 15点: 部門名・人名など固有名詞はあるが、シチュエーション固有の数値（金額・件数・%等）がない
-  　例×「営業部と生産管理部の連携がうまくいっていない」← 30台誤生産・150万円などの数値ゼロ→15点
-- 10点: シチュエーションへの言及が一般的（固有名詞も数値もほぼない）
-  　例×「納期遵守率が低く、取引先を失うリスク」← 91%、H社98%、F社、G社、2.7億などが一切ない→10点
-- 5点: ほぼ触れていない
-- 0点: 完全に一般論
+■ 着地（引用: {step1_result.get('landing_quote', 'なし')} / 数値確認: {landing_hint}）
+25点: 定量数値＋具体的な状態変化の両方が明示されている（数値表現なしで25点は絶対不可）
+  例○「5,000万円の取引を守る（定量）＋発注が止まらない体制（状態変化）」
+20点: 定量数値 OR 状態変化のどちらか一方のみ
+  例△「来期までに2営業日以内を目指す」← 数値のみ
+15点: 効果の方向性はあるが数値も明確な状態変化もない
+10点: 「〜できると思います」「〜はずです」など推量表現（必ず10点）
+  例×「信頼を取り戻しましょう」← 呼びかけ表現であり断言でない、定量もない→10点
+  例×「減らせると思います」「改善できるはず」← 推量→10点
+5点: 効果がほぼ不明
+0点: 効果への言及なし
 
-■ 着地（引用: {step1_result.get('landing_quote','なし')}）
-- 25点: 定量的効果（数値）＋具体的な状態変化（何がどう変わるか）の両方が明示されている
-  　例○「つなぎ目の遅れをゼロ（状態変化）＋来四半期の遅延0件（定量効果）」→25点
-- 20点: 定量的数値 OR 状態変化のどちらか一方のみ
-  　例△「来期までに2営業日以内を目指す」← 数値目標のみ、状態変化の記述がない→20点
-- 15点: 効果の方向性はあるが数値も状態変化も曖昧
-  　例△「将来への投資に回す」「削減分を成長に使う」← 方向性はあるが定量も状態変化も弱い→15点
-- 10点: 「〜できると思います」「〜はずです」「〜でしょう」など推量・希望の表現（必ず10点）
-  　例×「減らせると思います」「よいはずです」「改善できるのでは」← 断言でない→10点
-- 5点: 効果がほぼ不明
-- 0点: 効果への言及なし
-
-【重要ルール】
-- 引用が「なし」の項目は0〜5点とせよ
-- 上記の「必ず×点」と明示された例と同等の発言は、迷わずその点数とせよ
-- 印象・全体感での加点は禁止。定義を機械的に適用せよ
-- scoreはhook_score + measure_score + evidence_score + landing_scoreの合計と必ず一致させよ
-- rankはS(90-100) / A(70-89) / B(51-69) / C(0-50) ※50点以下はC
+【厳守ルール】
+- 「〜ましょう」「〜と思います」「〜はずです」「〜できるはずです」は必ず10点以下
+- 数値表現が引用にない場合の着地は必ず20点以下
+- 引用が「なし」の項目は5点以下
+- 印象・全体感での加点は禁止
 
 以下のJSON形式のみで返してください：
 {{
-  "score": 合計点数（0-100の整数）,
-  "rank": "S/A/B/C",
   "hook_score": フックの点数（0/5/10/15/20/25のみ）,
   "measure_score": 施策の点数（0/5/10/15/20/25のみ）,
-  "evidence_score": 根拠の点数（0/5/10/15/20/25のみ）,
   "landing_score": 着地の点数（0/5/10/15/20/25のみ）,
-  "good_points": "引用を使って良かった点を具体的に（100文字程度）",
-  "improvements": "30秒で使えるフレーズを例示して改善提案（100文字程度）",
-  "next_tips": "次回使うべき固有名詞・数値・言い換え例を明示（100文字程度）",
+  "good_points": "良かった点を具体的に（100文字程度）",
+  "improvements": "改善提案とフレーズ例（100文字程度）",
+  "next_tips": "次回使うべき固有名詞・数値・言い換え例（100文字程度）",
   "comment": "師匠の温かい励まし（50文字程度）"
 }}"""
 
@@ -332,7 +364,7 @@ def evaluate_pitch(level, theme, transcript, pitch_time=0):
             resp2 = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "引用された証拠をもとに採点し、必ずJSON形式のみで返答してください。"},
+                    {"role": "system", "content": "証拠引用をもとに採点します。JSON形式のみで返答してください。"},
                     {"role": "user", "content": step2_prompt}
                 ],
                 response_format={"type": "json_object"},
@@ -341,32 +373,44 @@ def evaluate_pitch(level, theme, transcript, pitch_time=0):
             cj = resp2.choices[0].message.content.strip()
             r = json.loads(cj)
 
-            # ── Python側で合計・ランクを強制再計算 ────────────
-            calc = (r.get('hook_score', 0) + r.get('measure_score', 0)
-                    + r.get('evidence_score', 0) + r.get('landing_score', 0))
+            # ── Python側で全スコアを集計 ────────────────────────
+            hook_score     = r.get('hook_score', 0)
+            measure_score  = r.get('measure_score', 0)
+            landing_score  = r.get('landing_score', 0)
 
-            # ── ⏱️ 時間ペナルティ（40秒超で減点）────────────────
-            time_penalty = 0
-            if pitch_time > 60:
-                time_penalty = 15
-            elif pitch_time > 50:
-                time_penalty = 10
-            elif pitch_time > 40:
-                time_penalty = 5
+            # 着地: 数値なしで25点になっていたら強制修正
+            if not landing_has_number and landing_score >= 25:
+                landing_score = 20
+
+            # 合計 & 時間ペナルティ
+            calc = hook_score + measure_score + evidence_score + landing_score
+            if pitch_time > 60:   time_penalty = 15
+            elif pitch_time > 50: time_penalty = 10
+            elif pitch_time > 40: time_penalty = 5
+            else:                 time_penalty = 0
             final_score = max(0, calc - time_penalty)
 
-            # ── ランク判定（50点以下はC）─────────────────────
+            # ランク判定
             if final_score >= 90:   rank = 'S'
             elif final_score >= 70: rank = 'A'
             elif final_score >= 51: rank = 'B'
             else:                   rank = 'C'
 
-            r['score'] = final_score
-            r['rank'] = rank
-            r['time_penalty'] = time_penalty
-            r['relevance_warning'] = False
-            r['keywords_found'] = step1_result.get('relevant_keywords_found', '')
-            return r
+            return {
+                "score":          final_score,
+                "rank":           rank,
+                "hook_score":     hook_score,
+                "measure_score":  measure_score,
+                "evidence_score": evidence_score,
+                "landing_score":  landing_score,
+                "time_penalty":   time_penalty,
+                "good_points":    r.get('good_points', ''),
+                "improvements":   r.get('improvements', ''),
+                "next_tips":      r.get('next_tips', ''),
+                "comment":        r.get('comment', '精進せよ！'),
+                "relevance_warning": False,
+                "keywords_found": str(found_keywords),
+            }
 
         except Exception as e:
             err_str = str(e)
@@ -381,7 +425,8 @@ def evaluate_pitch(level, theme, transcript, pitch_time=0):
                     "improvements": "もう一度挑戦せよ。",
                     "next_tips": "再度試してみよ。",
                     "comment": f"エラー: {e}",
-                    "time_penalty": 0, "relevance_warning": False}
+                    "time_penalty": 0, "relevance_warning": False,
+                    "keywords_found": ""}
 # ==========================================
 # 時間フォーマット
 # ==========================================
