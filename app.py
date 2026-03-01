@@ -815,6 +815,8 @@ elif st.session_state.scene == 'ending':
         if all_s:
             st.markdown('<div class="secret-btn">', unsafe_allow_html=True)
             if st.button("★", key="secret_door"):
+                import time as _time
+                _time.sleep(2)
                 st.session_state.scene = 'secret_ending'
                 st.session_state.play_sound = 'secret'
                 st.rerun()
