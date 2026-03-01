@@ -840,30 +840,11 @@ elif st.session_state.scene == 'secret_ending':
     # ★ 音楽ファイル（secret_ending_music.mp3 を同ディレクトリに配置）
     music_path = "secret_ending_music.mp3"
     if os.path.exists(music_path):
-        import base64
+        import base64, time as _t
+        # 効果音が鳴り終わるのを待つ（2秒）
+        _t.sleep(2)
         with open(music_path, "rb") as f:
-            music_b64 = base64.b64encode(f.read()).decode()
-        # autoplayせず、JSで2秒後に再生開始
-        st.markdown(f"""<audio id="secret_bgm" style="display:none">
-  <source src="data:audio/mp3;base64,{music_b64}" type="audio/mp3">
-</audio>
-<script>
-(function() {{
-  var attempts = 0;
-  function tryPlay() {{
-    var audio = document.getElementById('secret_bgm');
-    if (audio) {{
-      setTimeout(function() {{
-        audio.play().catch(function(){{}});
-      }}, 2000);
-    }} else if (attempts < 20) {{
-      attempts++;
-      setTimeout(tryPlay, 100);
-    }}
-  }}
-  tryPlay();
-}})();
-</script>""", unsafe_allow_html=True)
+            st.audio(f.read(), format="audio/mp3", autoplay=True)
     else:
         st.info("🎵 BGMファイル（secret_ending_music.mp3）をアプリと同じフォルダに配置してください。")
 
