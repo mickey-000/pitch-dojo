@@ -583,7 +583,7 @@ elif st.session_state.scene == 'quest':
     </script>
     """, unsafe_allow_html=True)
 
-    st.info(f"📋 **状況**\n\n{ti['situation'][lv]}")
+    st.markdown(f'<div style="background:rgba(0,0,0,0.5);border:2px solid #60a5fa;border-radius:10px;padding:16px;margin:8px 0;color:#ffffff;font-size:15px;line-height:1.8;"><strong style="color:#93c5fd;">📋 状況</strong><br><br>{ti['situation'][lv]}</div>', unsafe_allow_html=True)
     st.warning(f"🎯 **ミッション**\n\n{ti['mission'][lv]}")
     st.markdown(f"""<div class="core-info-box">🔑 <strong>核心情報（ピッチに使え）</strong>: {ti['core_info'][lv]}</div>""", unsafe_allow_html=True)
 
@@ -622,7 +622,7 @@ elif st.session_state.scene == 'pitch':
 
     st.markdown(f"## {boss['emoji']} {boss['name']}へのピッチ")
     st.markdown(f"### {ti['title']}")
-    st.info(f"📋 **状況**\n\n{ti['situation'][lv]}")
+    st.markdown(f'<div style="background:rgba(0,0,0,0.5);border:2px solid #60a5fa;border-radius:10px;padding:16px;margin:8px 0;color:#ffffff;font-size:15px;line-height:1.8;"><strong style="color:#93c5fd;">📋 状況</strong><br><br>{ti['situation'][lv]}</div>', unsafe_allow_html=True)
     st.warning(f"🎯 **ミッション**\n\n{ti['mission'][lv]}")
     st.markdown(f"""<div class="core-info-box">🔑 <strong>核心情報</strong>: {ti['core_info'][lv]}<br>
     ⏱️ <strong>30秒</strong>（約150〜175文字）で伝えよ！</div>""", unsafe_allow_html=True)
